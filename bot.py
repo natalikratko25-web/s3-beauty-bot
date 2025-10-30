@@ -40,6 +40,20 @@ def is_time_slot_available(service, date, time):
         orderBy="startTime"
     ).execute()
 
+def main():
+    TOKEN = "8302341867:AAFtCeDq2eEBWe7C857lfqTQ-IKOxskxZX4"  # <-- ось тут вставляєш свій токен
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("🤖 Бот запущений. Натисни /start у Telegram.")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
+
     return not events_result.get("items", [])
 
 
@@ -86,3 +100,6 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name, date, time = context.user_data["name"], context.user_data["date"], context.user_data["time"]
 
     await update.message.rep
+    
+
+

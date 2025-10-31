@@ -15,6 +15,12 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 
+try:
+    import telegram
+    print("DEBUG PTB version:", getattr(telegram, "__version__", "no __version__"))
+except Exception as e:
+    print("DEBUG PTB import error:", e)
+
 # === НАЛАШТУВАННЯ ===
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("BOT_TOKEN", "8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0")
@@ -158,3 +164,4 @@ if __name__ == "__main__":
         url_path=TOKEN,
         webhook_url=f"https://s3-beauty-bot.onrender.com/{TOKEN}",
     )
+

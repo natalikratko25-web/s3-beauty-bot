@@ -7,9 +7,9 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,
-    ContextTypes,
     ConversationHandler,
+    ContextTypes,
+    filters,
 )
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -17,7 +17,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 # === НАЛАШТУВАННЯ ===
 logging.basicConfig(level=logging.INFO)
-TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")  # 🔹 вкажи в Render Environment
+TOKEN = os.environ.get("BOT_TOKEN", "ТВОЙ_ТОКЕН_ТУТ")
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
 # === GOOGLE CALENDAR ===
@@ -32,6 +32,7 @@ def get_calendar_service():
             token.write(creds.to_json())
     return build("calendar", "v3", credentials=creds)
 
+
 def is_time_slot_available(service, date, time):
     start_time = datetime.datetime.combine(date, time)
     end_time = start_time + datetime.timedelta(minutes=90)
@@ -39,8 +40,8 @@ def is_time_slot_available(service, date, time):
         service.events()
         .list(
             calendarId="primary",
-            timeMin=start_time.isoformat(),
-            timeMax=end_time.isoformat(),
+            timeMin=start_time.isoformat() + "Z",
+            timeMax=end_time.isoformat() + "Z",
             singleEvents=True,
             orderBy="startTime",
         )
@@ -48,19 +49,18 @@ def is_time_slot_available(service, date, time):
     )
     return not events_result.get("items", [])
 
+
 # === СТАНИ РОЗМОВИ ===
 NAME, PHONE, DATE, TIME = range(4)
 
 # === ОБРОБНИКИ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Вітаю 💅 Давайте знайомитися. Я бот салону краси S3!\nА як вас звати?"
-    )
+    await update.message.reply_text("Вітаю 💅 Я бот салону краси S3!\nЯк вас звати?")
     return NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["name"] = update.message.text
-    await update.message.reply_text("Приємно познайомитись! 😊\nВаш номер телефону?")
+    await update.message.reply_text("Приємно! 😊 Вкажіть, будь ласка, ваш номер телефону:")
     return PHONE
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,7 +75,7 @@ async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏰ Вкажіть бажаний час (у форматі ГГ:ХХ):")
         return TIME
     except ValueError:
-        await update.message.reply_text("❌ Невірний формат дати. Введіть у форматі РРРР-ММ-ДД:")
+        await update.message.reply_text("❌ Формат дати неправильний. Введіть ще раз: РРРР-ММ-ДД")
         return DATE
 
 async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,14 +85,13 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         service = get_calendar_service()
         date = context.user_data["date"]
 
-        # Перевірка доступності
         if not is_time_slot_available(service, date, time):
-            await update.message.reply_text("⚠️ На цей час уже є запис. Оберіть інший час.")
+            await update.message.reply_text("⚠️ Цей час уже зайнятий. Спробуйте інший.")
             return TIME
 
-        # Створення події
         start_time = datetime.datetime.combine(date, time)
         end_time = start_time + datetime.timedelta(minutes=90)
+
         event = {
             "summary": f"💅 Запис у S3 Beauty Salon ({context.user_data['name']})",
             "description": f"Телефон: {context.user_data['phone']}",
@@ -101,19 +100,18 @@ async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         service.events().insert(calendarId="primary", body=event).execute()
 
-        # Відправляємо візитку-підтвердження
         await update.message.reply_text(
             f"✨ Запис підтверджено!\n\n"
             f"👩‍💼 Ім'я: {context.user_data['name']}\n"
             f"📞 Телефон: {context.user_data['phone']}\n"
             f"📅 Дата: {date.strftime('%d.%m.%Y')}\n"
-            f"⏰ Час: {time.strftime('%H:%M')} - {(end_time.time()).strftime('%H:%M')}\n\n"
+            f"⏰ Час: {time.strftime('%H:%M')}\n\n"
             f"До зустрічі у салоні краси S3 💖"
         )
         return ConversationHandler.END
 
     except ValueError:
-        await update.message.reply_text("❌ Невірний формат часу. Спробуйте ще раз (ГГ:ХХ):")
+        await update.message.reply_text("❌ Формат часу неправильний. Введіть ще раз: ГГ:ХХ")
         return TIME
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,23 +121,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === FLASK APP ===
 app = Flask(__name__)
+application = Application.builder().token(TOKEN).updater(None).build()
 
 @app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    """Отримання оновлень від Telegram"""
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
     return "ok", 200
 
 @app.route("/", methods=["GET"])
-def home():
-    """Перевірка стану бота"""
-    return "🤖 S3 Beauty Bot працює через Render!"
+def index():
+    return "🤖 S3 Beauty Bot працює!"
 
 
-# === TELEGRAM APP ===
-application = Application.builder().token(TOKEN).build()
-
+# === HANDLERS ===
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
     states={
@@ -150,15 +146,19 @@ conv_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", cancel)],
 )
+
 application.add_handler(conv_handler)
 
 
-# === ЗАПУСК НА RENDER ===
+# === RUN ===
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 10000))
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"https://s3-beauty-bot.onrender.com/{TOKEN}",
-    )
+    import asyncio
+    async def run():
+        await application.initialize()
+        await application.start()
+        await application.bot.set_webhook(
+            url=f"https://s3-beauty-bot.onrender.com/{TOKEN}"
+        )
+        app.run(host="0.0.0.0", port=PORT)
+    asyncio.run(run())

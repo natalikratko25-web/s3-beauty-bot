@@ -1,139 +1,252 @@
 import os
+import logging
 import datetime
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ContextTypes, ConversationHandler
+    ApplicationBuilder, CommandHandler, MessageHandler, ConversationHandler,
+    ContextTypes, filters
 )
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
-# --- Google Calendar setup ---
+# -----------------------
+# Налаштування логування
+# -----------------------
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# -----------------------
+# Константи / стани
+# -----------------------
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+STATE_NAME, STATE_DATE, STATE_TIME, STATE_PHONE = range(4)
+TIMEZONE = 'Europe/Kiev'  # використовується при створенні події
+SLOT_MINUTES = 90  # 1.5 години
 
+# -----------------------
+# Допоміжні функції
+# -----------------------
 def get_calendar_service():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    else:
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
-    return build('calendar', 'v3', credentials=creds)
+    """
+    Повертає об'єкт Google Calendar service.
+    Очікує, що token.json та credentials.json присутні у робочій директорії.
+    У середовищах без браузера (як Render) не намагається відкривати InstalledAppFlow.
+    """
+    if not os.path.exists('token.json'):
+        logger.error("token.json не знайдено. Завантажте token.json на сервер або як Secret File.")
+        raise FileNotFoundError("token.json not found")
 
-# --- Conversation states ---
-NAME, DATE, TIME, PHONE = range(4)
+    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        # на сервері ми не можемо відкривати браузер — повідомляємо про помилку
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.exception("Не вдалося оновити токен: %s", e)
+                raise
+        else:
+            logger.error("Credentials невалідні або немає refresh token. Не можна виконати авторизацію на сервері.")
+            raise RuntimeError("Invalid Google credentials on server")
+    service = build('calendar', 'v3', credentials=creds)
+    return service
 
-# --- Start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Вітаю 💅 Давайте знайомитися. Я бот салону краси S3!\nА як вас звати?")
-    return NAME
+def format_iso_with_tz(dt: datetime.datetime) -> str:
+    """Повертає ISO-строку з +02:00 (зона Europe/Kiev)."""
+    # переконаємося, що це naive datetime, потім додаємо +02:00 у рядок
+    return dt.isoformat() + '+02:00'
 
-# --- Get name ---
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['name'] = update.message.text
-    await update.message.reply_text("Приємно познайомитись 💖! На яку дату бажаєте записатися? (у форматі РРРР-ММ-ДД)")
-    return DATE
+def is_time_slot_available(service, date_obj: datetime.date, time_obj: datetime.time) -> bool:
+    """
+    Перевіряє, чи є події у проміжку [start, start + SLOT_MINUTES).
+    Повертає True, якщо слот вільний.
+    """
+    start_dt = datetime.datetime.combine(date_obj, time_obj)
+    end_dt = start_dt + datetime.timedelta(minutes=SLOT_MINUTES)
+    time_min = format_iso_with_tz(start_dt)
+    time_max = format_iso_with_tz(end_dt)
 
-# --- Get date ---
-async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['date'] = update.message.text
-    await update.message.reply_text("⏰ На котру годину бажаєте? (наприклад 14:30)")
-    return TIME
-
-# --- Check available time ---
-def is_time_slot_available(service, date, time):
-    start_time = datetime.datetime.combine(date, time)
-    end_time = start_time + datetime.timedelta(minutes=90)
-    events_result = service.events().list(
-        calendarId='primary',
-        timeMin=start_time.isoformat(),
-        timeMax=end_time.isoformat(),
-        singleEvents=True,
-        orderBy='startTime'
-    ).execute()
-    return len(events_result.get('items', [])) == 0
-
-# --- Get time ---
-async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        date = datetime.datetime.strptime(context.user_data['date'], "%Y-%m-%d").date()
-        time = datetime.datetime.strptime(update.message.text, "%H:%M").time()
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=time_min,
+            timeMax=time_max,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+    except HttpError as e:
+        logger.exception("HTTP error при запиті events.list: %s", e)
+        raise
+    except Exception as e:
+        logger.exception("Інша помилка при перевірці слоту: %s", e)
+        raise
+
+    items = events_result.get('items', [])
+    return len(items) == 0
+
+# -----------------------
+# Обробники бот-діалогу
+# -----------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Вітаю 💅 Я — бот салону краси S3. Давайте знайомитися! Як вас звати?"
+    )
+    return STATE_NAME
+
+async def handle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['name'] = update.message.text.strip()
+    await update.message.reply_text("Чудово! На яку дату бажаєте записатися? (формат YYYY-MM-DD)")
+    return STATE_DATE
+
+async def handle_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        date_obj = datetime.datetime.strptime(text, "%Y-%m-%d").date()
+        context.user_data['date'] = date_obj
+        await update.message.reply_text("Вкажіть, будь ласка, час (формат HH:MM, наприклад 14:30)")
+        return STATE_TIME
     except ValueError:
-        await update.message.reply_text("⚠️ Формат невірний. Введіть час у форматі HH:MM, наприклад 15:00")
-        return TIME
+        await update.message.reply_text("Неправильний формат дати. Спробуйте ще (YYYY-MM-DD).")
+        return STATE_DATE
 
-    service = get_calendar_service()
+async def handle_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    try:
+        time_obj = datetime.datetime.strptime(text, "%H:%M").time()
+        context.user_data['time'] = time_obj
+        await update.message.reply_text("Дякую! Тепер залиште, будь ласка, номер телефону для підтвердження (наприклад +380971234567).")
+        return STATE_PHONE
+    except ValueError:
+        await update.message.reply_text("Невірний формат часу. Введіть у форматі HH:MM (наприклад 15:30).")
+        return STATE_TIME
 
-    if not is_time_slot_available(service, date, time):
-        await update.message.reply_text("❌ Цей час зайнятий. Виберіть, будь ласка, інший час.")
-        return TIME
-
-    context.user_data['time'] = update.message.text
-    await update.message.reply_text("📞 Будь ласка, залиште ваш номер телефону для підтвердження запису.")
-    return PHONE
-
-# --- Get phone and confirm ---
-async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text
+async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = update.message.text.strip()
     context.user_data['phone'] = phone
 
-    name = context.user_data['name']
-    date = context.user_data['date']
-    time = context.user_data['time']
+    name = context.user_data.get('name')
+    date_obj = context.user_data.get('date')
+    time_obj = context.user_data.get('time')
 
-    # --- Add event to Google Calendar ---
-    service = get_calendar_service()
-    start_time = datetime.datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
-    end_time = start_time + datetime.timedelta(minutes=90)
+    # Коротке підтвердження, щоб користувач знав, що йде обробка
+    await update.message.reply_text("🔎 Перевіряю доступність часу та створюю запис — трохи зачекайте...")
 
-    event = {
-        'summary': f'Запис клієнта {name}',
+    # Отримуємо сервіс календаря
+    try:
+        service = get_calendar_service()
+    except FileNotFoundError:
+        await update.message.reply_text("⚠️ Помилка: token.json не знайдено на сервері. Будь ласка, завантажте token.json як Secret File на Render.")
+        return ConversationHandler.END
+    except Exception as e:
+        logger.exception("Не вдалося ініціалізувати Calendar service: %s", e)
+        await update.message.reply_text("⚠️ Помилка авторизації Google Calendar. Спробуйте пізніше.")
+        return ConversationHandler.END
+
+    # Перевірка доступності слоту
+    try:
+        available = is_time_slot_available(service, date_obj, time_obj)
+    except Exception as e:
+        logger.exception("Помилка при перевірці слоту: %s", e)
+        await update.message.reply_text("⚠️ Сталася помилка при перевірці вільного часу. Спробуйте ще раз пізніше.")
+        return ConversationHandler.END
+
+    if not available:
+        # Згенеруємо кілька альтернативних варіантів
+        free_slots = []
+        start_dt = datetime.datetime.combine(date_obj, time_obj)
+        for i in range(1, 8):  # перевірити наступні слоти
+            candidate = (start_dt + datetime.timedelta(minutes=SLOT_MINUTES * i)).time()
+            try:
+                if is_time_slot_available(service, date_obj, candidate):
+                    free_slots.append(candidate.strftime("%H:%M"))
+                if len(free_slots) >= 3:
+                    break
+            except Exception:
+                # якщо є помилка при перевірці кожного слоту — ігноруємо його і продовжуємо
+                logger.exception("Помилка при перевірці альтернативного слоту для %s", candidate)
+                continue
+
+        if free_slots:
+            await update.message.reply_text("⏰ На обраний час вже є запис. Ось кілька вільних варіантів: " + ", ".join(free_slots))
+        else:
+            await update.message.reply_text("⏰ На цей день/час немає вільних слотів. Спробуйте іншу дату або зверніться до салону.")
+        return ConversationHandler.END
+
+    # Якщо вільно — створюємо подію
+    start_dt = datetime.datetime.combine(date_obj, time_obj)
+    end_dt = start_dt + datetime.timedelta(minutes=SLOT_MINUTES)
+
+    event_body = {
+        'summary': f'Запис S3 — {name}',
         'description': f'Телефон: {phone}',
-        'start': {'dateTime': start_time.isoformat(), 'timeZone': 'Europe/Kiev'},
-        'end': {'dateTime': end_time.isoformat(), 'timeZone': 'Europe/Kiev'},
+        'start': {'dateTime': start_dt.isoformat(), 'timeZone': TIMEZONE},
+        'end': {'dateTime': end_dt.isoformat(), 'timeZone': TIMEZONE},
     }
 
-    service.events().insert(calendarId='primary', body=event).execute()
+    try:
+        service.events().insert(calendarId='primary', body=event_body).execute()
+    except HttpError as e:
+        logger.exception("HttpError при створенні події: %s", e)
+        await update.message.reply_text("⚠️ Не вдалося створити подію в календарі. Спробуйте пізніше.")
+        return ConversationHandler.END
+    except Exception as e:
+        logger.exception("Інша помилка при створенні події: %s", e)
+        await update.message.reply_text("⚠️ Сталася помилка при створенні запису. Спробуйте пізніше.")
+        return ConversationHandler.END
 
-    await update.message.reply_text(
-        f"💅 Запис підтверджено!\n\n🧾 Ім'я: {name}\n📅 Дата: {date}\n⏰ Час: {time}\n📞 Телефон: {phone}\n\nДо зустрічі у салоні S3 ❤️"
+    # Надсилаємо візитку підтвердження
+    confirmation = (
+        "✨ *Ваш запис підтверджено!* ✨\n\n"
+        f"👤 *Ім'я:* {name}\n"
+        f"📅 *Дата:* {date_obj.strftime('%d.%m.%Y')}\n"
+        f"⏰ *Час:* {time_obj.strftime('%H:%M')} — {end_dt.time().strftime('%H:%M')}\n"
+        f"📞 *Телефон:* {phone}\n\n"
+        "💖 Чекаємо на вас у *S3 Beauty Salon*! \n_Естетика в кожній деталі._"
     )
+    await update.message.reply_text(confirmation, parse_mode='Markdown')
 
     return ConversationHandler.END
 
-# --- Cancel handler ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Запис скасовано.")
+    await update.message.reply_text("Запис скасовано. Якщо передумаєте — напишіть /start.")
     return ConversationHandler.END
 
-# --- Main ---
+# -----------------------
+# Точка входу
+# -----------------------
 def main():
-    TOKEN = os.getenv("BOT_TOKEN")  # <-- Береться зі змінної середовища Render
+    TOKEN = os.getenv('BOT_TOKEN')
     if not TOKEN:
-        print("❌ ПОМИЛКА: BOT_TOKEN не знайдено. Додай його у Render → Environment → BOT_TOKEN")
+        logger.error("BOT_TOKEN не знайдено у змінних середовища. Додайте змінну BOT_TOKEN у Render Environment.")
+        print("BOT_TOKEN not set. Please add it to environment variables.")
         return
 
     app = ApplicationBuilder().token(TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+    conv = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
+            STATE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_name)],
+            STATE_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_date)],
+            STATE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_time)],
+            STATE_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_phone)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True
     )
 
-    app.add_handler(conv_handler)
-    print("🤖 Бот запущено на Render! Натисни /start у Telegram.")
+    app.add_handler(conv)
+
+    logger.info("Бот запускається...")
+    print("Бот запускається...")  # корисно в логах Render
     app.run_polling()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+
+
 

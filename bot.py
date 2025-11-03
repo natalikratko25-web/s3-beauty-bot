@@ -1,171 +1,178 @@
 import os
-import datetime
 import logging
 from flask import Flask, request
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
-    ConversationHandler,
+    CallbackContext,
+    CallbackQueryHandler,
 )
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+import datetime
 
-# === ЛОГІНГ ===
-logging.basicConfig(level=logging.INFO)
+# ---------- CONFIG ----------
+TOKEN = os.getenv("BOT_TOKEN", "8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0")
+PORT = int(os.getenv("PORT", 10000))
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_URL', 's3-beauty-bot.onrender.com')}/{TOKEN}"
+
+# Google Calendar settings
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+CALENDAR_ID = "primary"  # або свій ID календаря
+CREDENTIALS_FILE = "credentials.json"
+TOKEN_FILE = "token.json"
+
+# ---------- LOGGING ----------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-# === КОНСТАНТИ ===
-TOKEN = os.getenv("BOT_TOKEN", "8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0")
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-PORT = int(os.environ.get("PORT", 10000))
+# ---------- FLASK ----------
+app = Flask(__name__)
+application = None
 
-# === Google Calendar ===
+
 def get_calendar_service():
-    if not os.path.exists("token.json"):
-        logger.error("❌ Файл token.json відсутній. Створи його локально перед деплоєм.")
-        raise FileNotFoundError("token.json missing")
+    """Підключення до Google Calendar."""
+    creds = None
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    else:
+        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+        creds = flow.run_local_server(port=0)
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+    return build('calendar', 'v3', credentials=creds)
 
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-    return build("calendar", "v3", credentials=creds)
 
-
-def is_time_slot_available(service, date, time):
-    start_time = datetime.datetime.combine(date, time)
-    end_time = start_time + datetime.timedelta(minutes=90)
-    events_result = (
-        service.events()
-        .list(
-            calendarId="primary",
-            timeMin=start_time.isoformat(),
-            timeMax=end_time.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-        )
-        .execute()
+# ---------- BOT HANDLERS ----------
+async def start(update: Update, context: CallbackContext):
+    """Привітання користувача."""
+    keyboard = [
+        [InlineKeyboardButton("💅 Записатися", callback_data="book")],
+        [InlineKeyboardButton("ℹ️ Про нас", callback_data="info")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Вітаю 💖\nЯ — бот салону *S3 Beauty*!\nОбери дію нижче 👇",
+        parse_mode="Markdown",
+        reply_markup=reply_markup,
     )
-    return not events_result.get("items", [])
 
 
-# === СТАНИ РОЗМОВИ ===
-NAME, PHONE, DATE, TIME = range(4)
+async def button_handler(update: Update, context: CallbackContext):
+    """Обробка натискань кнопок."""
+    query = update.callback_query
+    await query.answer()
 
-# === ОБРОБНИКИ ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💅 Вітаю! Я бот салону краси S3.\nЯк вас звати?")
-    return NAME
+    if query.data == "book":
+        await query.message.reply_text("Напишіть, будь ласка, дату та час запису (наприклад: 5 листопада, 15:00)")
+        context.user_data["booking_step"] = "waiting_for_datetime"
 
-
-async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["name"] = update.message.text
-    await update.message.reply_text("Приємно познайомитись 😊\nВаш номер телефону?")
-    return PHONE
+    elif query.data == "info":
+        await query.message.reply_text("💅 Салон S3 Beauty — професійні послуги манікюру та педикюру у Києві 💖")
 
 
-async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["phone"] = update.message.text
-    await update.message.reply_text("На яку дату хочете записатись? (формат: РРРР-ММ-ДД)")
-    return DATE
+async def message_handler(update: Update, context: CallbackContext):
+    """Обробка повідомлень користувача."""
+    user_id = update.message.from_user.id
+    text = update.message.text
+
+    # Якщо користувач вводить дату/час після натискання "Записатися"
+    if context.user_data.get("booking_step") == "waiting_for_datetime":
+        context.user_data["datetime"] = text
+        await update.message.reply_text(f"Ви хочете записатися на {text}? Підтвердити?",
+                                        reply_markup=InlineKeyboardMarkup([
+                                            [InlineKeyboardButton("✅ Так", callback_data="confirm_booking")],
+                                            [InlineKeyboardButton("❌ Скасувати", callback_data="cancel_booking")]
+                                        ]))
+        context.user_data["booking_step"] = "confirmation"
+
+    else:
+        await update.message.reply_text("Будь ласка, скористайтесь кнопками нижче /start")
 
 
-async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_booking(update: Update, context: CallbackContext):
+    """Підтвердження запису."""
+    query = update.callback_query
+    await query.answer()
+
+    datetime_text = context.user_data.get("datetime")
+    if not datetime_text:
+        await query.message.reply_text("Помилка: не знайдено дату та час запису.")
+        return
+
+    # Створення події у Google Calendar
     try:
-        date = datetime.datetime.strptime(update.message.text, "%Y-%m-%d").date()
-        context.user_data["date"] = date
-        await update.message.reply_text("⏰ Вкажіть час (ГГ:ХХ):")
-        return TIME
-    except ValueError:
-        await update.message.reply_text("❌ Невірний формат дати. Приклад: 2025-11-05")
-        return DATE
-
-
-async def get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        time = datetime.datetime.strptime(update.message.text, "%H:%M").time()
-        context.user_data["time"] = time
         service = get_calendar_service()
-        date = context.user_data["date"]
-
-        if not is_time_slot_available(service, date, time):
-            await update.message.reply_text("⚠️ Цей час зайнятий, оберіть інший.")
-            return TIME
-
-        start_time = datetime.datetime.combine(date, time)
-        end_time = start_time + datetime.timedelta(minutes=90)
-
+        start_time = datetime.datetime.now() + datetime.timedelta(days=1)
+        end_time = start_time + datetime.timedelta(hours=1)
         event = {
-            "summary": f"💅 Запис у S3 ({context.user_data['name']})",
-            "description": f"Телефон: {context.user_data['phone']}",
-            "start": {"dateTime": start_time.isoformat(), "timeZone": "Europe/Kyiv"},
-            "end": {"dateTime": end_time.isoformat(), "timeZone": "Europe/Kyiv"},
+            'summary': f'Запис клієнта з Telegram',
+            'description': f'Час: {datetime_text}',
+            'start': {'dateTime': start_time.isoformat(), 'timeZone': 'Europe/Kyiv'},
+            'end': {'dateTime': end_time.isoformat(), 'timeZone': 'Europe/Kyiv'},
         }
-        service.events().insert(calendarId="primary", body=event).execute()
+        service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
-        await update.message.reply_text(
-            f"✨ Запис підтверджено!\n\n"
-            f"👩‍💼 {context.user_data['name']}\n"
-            f"📞 {context.user_data['phone']}\n"
-            f"📅 {date.strftime('%d.%m.%Y')}\n"
-            f"⏰ {time.strftime('%H:%M')} – {(end_time.time()).strftime('%H:%M')}"
-        )
-        return ConversationHandler.END
-    except ValueError:
-        await update.message.reply_text("❌ Формат часу має бути ГГ:ХХ.")
-        return TIME
+        await query.message.reply_text("✅ Запис підтверджено! Дякуємо 💅")
+        context.user_data.clear()
+
+    except Exception as e:
+        logger.error(f"Google Calendar error: {e}")
+        await query.message.reply_text("⚠️ Сталася помилка при записі в календар.")
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Скасовано ❌")
-    return ConversationHandler.END
+async def cancel_booking(update: Update, context: CallbackContext):
+    """Скасування запису."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("❌ Запис скасовано.")
+    context.user_data.clear()
 
 
-# === ФУНКЦІЯ СТВОРЕННЯ ДОДАТКУ ===
+# ---------- FLASK ROUTES ----------
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    """Обробка вхідних оновлень від Telegram."""
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    return application.update_queue.put_nowait(update) or "ok"
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ S3 Beauty Telegram Bot is running!"
+
+
+# ---------- MAIN APP ----------
 def create_app():
-    app = Flask(__name__)
+    global application
+    application = Application.builder().token(TOKEN).build()
 
-    telegram_app = Application.builder().token(TOKEN).build()
+    # handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler, pattern="^(book|info)$"))
+    application.add_handler(CallbackQueryHandler(confirm_booking, pattern="confirm_booking"))
+    application.add_handler(CallbackQueryHandler(cancel_booking, pattern="cancel_booking"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
-            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_time)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+    # Set webhook
+    async def set_webhook():
+        await application.bot.set_webhook(WEBHOOK_URL)
+        logger.info(f"✅ Webhook set to: {WEBHOOK_URL}")
 
-    telegram_app.add_handler(conv_handler)
-
-    @app.route("/", methods=["GET"])
-    def index():
-        return "🤖 S3 Beauty Bot працює!"
-
-    @app.route(f"/{TOKEN}", methods=["POST"])
-    async def webhook():
-        data = request.get_json(force=True)
-        update = Update.de_json(data, telegram_app.bot)
-        await telegram_app.process_update(update)
-        return "ok", 200
-
-    return app, telegram_app
+    application.run_polling = lambda: None  # disable polling
+    application.initialize()
+    application.post_init(set_webhook)
+    return app, application
 
 
-# === ЗАПУСК ===
 if __name__ == "__main__":
     app, telegram_app = create_app()
-
-    # Встановлення webhook
-    import asyncio
-    asyncio.run(
-        telegram_app.bot.set_webhook(
-            url=f"https://s3-beauty-bot.onrender.com/{TOKEN}"
-        )
-    )
-
     app.run(host="0.0.0.0", port=PORT)

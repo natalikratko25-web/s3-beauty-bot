@@ -8,7 +8,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 # ================= CONFIG =================
-TOKEN = os.getenv("8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0") 
+TOKEN = os.getenv("TOKEN") 
 PORT = int(os.environ.get("PORT", 10000))
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
@@ -109,3 +109,4 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=PORT)
 
     asyncio.run(main())
+

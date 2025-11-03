@@ -4,6 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: |
+      python -V
       pip install --upgrade pip
       pip install --no-cache-dir -r requirements.txt
     startCommand: python bot.py
@@ -11,4 +12,4 @@ services:
       - key: PORT
         value: 10000
       - key: BOT_TOKEN
-        value: 8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0
+        value: "8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0"

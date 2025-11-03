@@ -181,20 +181,15 @@ def webhook():
                 end_time = (datetime.datetime.combine(data["date"], data["time"]) + datetime.timedelta(minutes=90)).time()
 
                 send_message(chat_id,
-                    "✨ Запис підтверджено!\n\n"
-                    f"👩‍💼 Ім'я: {data['name']}\n"
-                    f"📞 Телефон: {data['phone']}\n"
-                    f"📅 Дата: {data['date'].strftime('%d.%m.%Y')}\n"
-                    f"⏰ Час: {data['time'].strftime('%H:%M')} - {end_time.strftime('%H:%M')}\n\n"
-                    f"Номер події в Google Calendar: {created.get('id', '—')}"
+                     "✨ Запис підтверджено!\n\n"
+    f"👩‍💼 Ім'я: {data['name']}\n"
+    f"📞 Телефон: {data['phone']}\n"
+    f"📅 Дата: {data['date'].strftime('%d.%m.%Y')}\n"
+    f"⏰ Час: {data['time'].strftime('%H:%M')} - "
+    f"{(data['datetime'] + timedelta(hours=1)).strftime('%H:%M')}\n\n"
+    "💅 Дякуємо, що обрали *S3 Beauty Salon*!\n"
+    "Чекаємо на вас у призначений час 💖"
                 )
-
-                # візитка-підтвердження (VCARD-like текст)
-                vcard = (
-                    "BEGIN:VCARD\nVERSION:3.0\n"
-                    f"N:{data['name']}\nTEL:{data['phone']}\nORG:S3 Beauty Salon\nEND:VCARD"
-                )
-                send_message(chat_id, "Візитка підтвердження (VCARD):\n" + vcard)
 
                 # очищаємо стан користувача
                 user_states.pop(chat_id, None)
@@ -212,3 +207,4 @@ def webhook():
 if __name__ == "__main__":
     logger.info("Запускаю Flask на порту %s, webhook path: %s", PORT, WEBHOOK_PATH)
     app.run(host="0.0.0.0", port=PORT)
+

@@ -2,15 +2,13 @@ services:
   - type: web
     name: s3-beauty-bot
     env: python
-    region: oregon
     plan: free
-    buildCommand: >
-      pip3 install --no-cache-dir --upgrade pip &&
-      pip3 install --no-cache-dir -r requirements.txt
-    startCommand: python3 bot.py
+    buildCommand: |
+      pip install --upgrade pip
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: python bot.py
     envVars:
-      - key: TOKEN
-        value: 8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0
       - key: PORT
-        value: "10000"
-      # не додавай credentials.json/token.json сюди — завантаж їх як файл у репозиторій
+        value: 10000
+      - key: BOT_TOKEN
+        value: 8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0

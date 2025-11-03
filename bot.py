@@ -15,12 +15,12 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-# --- CONFIG ---
+# === CONFIG ===
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("BOT_TOKEN", "8302341867:AAHd_faDWIBnC01wPdtoER75YaUb_gngdE0")
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-# --- GOOGLE CALENDAR ---
+# === Google Calendar ===
 def get_calendar_service():
     creds = None
     if os.path.exists("token.json"):
@@ -44,10 +44,10 @@ def is_time_slot_available(service, date, time):
     ).execute()
     return not events.get("items", [])
 
-# --- Conversation states ---
+# === Conversation states ===
 NAME, PHONE, DATE, TIME = range(4)
 
-# --- Handlers ---
+# === Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💅 Вітаю! Я бот салону краси S3.\nЯк вас звати?")
     return NAME
@@ -111,7 +111,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Скасовано ❌")
     return ConversationHandler.END
 
-# --- Telegram Application ---
+# === Telegram application ===
 application = Application.builder().token(TOKEN).build()
 conv_handler = ConversationHandler(
     entry_points=[CommandHandler("start", start)],
@@ -125,21 +125,20 @@ conv_handler = ConversationHandler(
 )
 application.add_handler(conv_handler)
 
-# --- Flask Webhook Server ---
+# === Flask webhook server ===
 app = Flask(__name__)
 
 @app.route("/", methods=["GET"])
-def index():
+def home():
     return "🤖 S3 Beauty Bot працює!"
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, application.bot)
+    update = Update.de_json(request.get_json(force=True), application.bot)
     application.update_queue.put_nowait(update)
     return "ok", 200
 
-# --- Start Flask server ---
+# === Start Flask server ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
